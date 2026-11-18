@@ -141,12 +141,24 @@ def _solve_intercept(score: np.ndarray, target_rate: float) -> float:
 
 
 def walk_forward_windows(
-    df: pd.DataFrame, train_days: int = 60, test_days: int = 30, step_days: int = 30
+    df: pd.DataFrame,
+    train_days: int = 60,
+    test_days: int = 30,
+    step_days: int = 30,
+    embargo_days: int = 7,
 ) -> list[tuple[pd.DataFrame, pd.DataFrame]]:
     """Rolling train/test splits where the test period strictly follows training.
 
     Random splits leak the future into training when behaviour is driven by
     releases, events and seasonality, which inflates every offline metric.
+
+    ``embargo_days`` exists because the label is a D7 outcome. Standing at the
+    training cutoff, you do not yet know how users who installed in the last
+    seven days turned out -- their D7 window has not closed. Training on them
+    uses labels that would not exist at the time, which is a subtler form of
+    the same temporal leakage the walk-forward split is meant to prevent. The
+    embargo drops that tail. It should equal the label horizon.
+
     Successive windows overlap by ``train_days - step_days``, so the windows are
     not fully independent and confidence intervals are mildly understated. That
     is a deliberate trade-off under a limited observation period.
@@ -156,13 +168,17 @@ def walk_forward_windows(
     end = df.install_date.max()
     while True:
         train_end = t0 + pd.Timedelta(days=train_days)
-        test_end = train_end + pd.Timedelta(days=test_days)
+        test_start = train_end
+        test_end = test_start + pd.Timedelta(days=test_days)
         if test_end > end:
             break
+        # Labels for the final `embargo_days` of the training period are not yet
+        # observable at the cutoff, so those installs are excluded.
+        label_cutoff = train_end - pd.Timedelta(days=embargo_days)
         out.append(
             (
-                df[(df.install_date >= t0) & (df.install_date < train_end)],
-                df[(df.install_date >= train_end) & (df.install_date < test_end)],
+                df[(df.install_date >= t0) & (df.install_date < label_cutoff)],
+                df[(df.install_date >= test_start) & (df.install_date < test_end)],
             )
         )
         t0 = t0 + pd.Timedelta(days=step_days)

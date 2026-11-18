@@ -75,11 +75,17 @@ behaviour is driven by releases and seasonality.
 
 | Window | Test users | Payers | AUC (all) | AUC (payers) | AP | Total error, uncal. | **Total error, calibrated** | Naive |
 |---|---|---|---|---|---|---|---|---|
-| W1 | 299,737 | 1,499 | 0.885 | 0.780 | 0.766 | +22.7% | **−10.6%** | −41.0% |
-| W2 | 299,989 | 1,454 | 0.886 | 0.779 | 0.794 | +32.5% | **−2.5%** | −37.9% |
-| W3 | 299,609 | 1,578 | 0.891 | 0.771 | 0.778 | +26.5% | **−6.3%** | −40.7% |
+| W1 | 299,737 | 1,499 | 0.882 | 0.770 | 0.758 | +24.6% | **−9.5%** | −41.0% |
+| W2 | 299,989 | 1,454 | 0.888 | 0.778 | 0.791 | +32.2% | **−0.5%** | −37.9% |
+| W3 | 299,609 | 1,578 | 0.884 | 0.764 | 0.775 | +21.4% | **−6.7%** | −40.7% |
 
-Stage 2 over-predicts by 23–33% before calibration, because it trains only on
+The split carries a **7-day embargo**: the label is a D7 outcome, so standing at
+the training cutoff you do not yet know how users who installed in the last
+week turned out. Training on them would use labels that could not exist at the
+time — a quieter version of the same temporal leakage the walk-forward split
+exists to prevent.
+
+Stage 2 over-predicts by 21–32% before calibration, because it trains only on
 payers but scores everyone Stage 1 flags — around 45% of whom never pay.
 Isotonic regression corrects it. Isotonic rather than Platt because Platt
 assumes a sigmoid-shaped bias and this one is not sigmoid-shaped; isotonic
@@ -101,15 +107,16 @@ both took debugging to find:
 
 | Threshold | Precision | Recall | F1 |
 |---|---|---|---|
-| 0.15 | 0.547 | 0.973 | 0.700 |
-| 0.20 | 0.564 | 0.957 | 0.709 |
-| 0.30 | 0.597 | 0.921 | 0.724 |
-| 0.50 | 0.654 | 0.837 | 0.734 |
-| **0.70** | **0.716** | **0.694** | 0.705 |
-| 0.80 | 0.767 | 0.558 | 0.646 |
+| 0.15 | 0.552 | 0.972 | 0.704 |
+| 0.20 | 0.569 | 0.953 | 0.712 |
+| 0.30 | 0.600 | 0.911 | 0.723 |
+| 0.40 | 0.632 | 0.876 | 0.734 |
+| 0.50 | 0.658 | 0.824 | 0.732 |
+| **0.70** | **0.710** | **0.671** | 0.690 |
+| 0.80 | 0.760 | 0.547 | 0.636 |
 
-Moving from 0.20 to 0.70 raises precision from 0.56 to 0.72 and drops recall
-from 0.96 to 0.69. That is a real, defensible trade-off: fewer false positives
+Moving from 0.20 to 0.70 raises precision from 0.57 to 0.71 and drops recall
+from 0.95 to 0.67. That is a real, defensible trade-off: fewer false positives
 into Stage 2, at the cost of missing roughly a third of genuine payers.
 
 What it is *not* is "precision 0.72 at recall 0.96". Quoting a precision from
@@ -129,8 +136,8 @@ threshold — much less than the usual framing suggests:
 | Recall | Single regression | Two-stage |
 |---|---|---|
 | ~95% | 0.538 | 0.537 |
-| ~85% | 0.622 | 0.635 |
-| ~70% | 0.687 | 0.706 |
+| ~85% | 0.625 | 0.637 |
+| ~70% | 0.681 | 0.694 |
 
 The advantage is real but modest, and it is structural rather than numerical:
 Stage 1 emits a probability you can move along the curve, and Stage 2 never
@@ -186,12 +193,40 @@ of being conservative, visibly so here.
 
 ---
 
+## Does it hold across seeds?
+
+A result that only works on one random seed is not a result. Across 4 seeds ×
+3 windows:
+
+| | |
+|---|---|
+| Calibration reduced absolute bias in | **11 of 12** window-seeds |
+| Mean total error, uncalibrated | +27.1% |
+| Mean total error, calibrated | **−1.3%** |
+| Sign of residual bias | 5 positive, 7 negative |
+
+The balanced sign matters: it says the remaining error is noise, not a
+systematic over-correction. The single failure is instructive — uncalibrated
+bias there was already only +6.7%, and when there is little bias to remove,
+calibration contributes variance without much to correct.
+
+```bash
+python tests/test_core.py    # 12 invariant tests, no pytest needed
+pytest -q                    # or via pytest
+```
+
+The tests assert reasoning, not just execution: that `ltv7 == ltv2 + delta`
+exactly, that no training install falls within the label horizon of the test
+start, that copying a column beats the leaked model, that precision rises
+monotonically as recall falls, that CUPED's θ matches its closed form, and
+that peeking inflates the false positive rate above nominal.
+
 ## Limitations
 
 Stated because a portfolio piece that hides its weaknesses is worth less than
 one that doesn't.
 
-- **WMAPE is worse than the naive baseline** (0.45–0.49 vs 0.38–0.41). The model
+- **WMAPE is worse than the naive baseline** (0.46–0.49 vs 0.38–0.41). The model
   buys large gains in *aggregate* bias while per-user absolute error gets worse
   than simply predicting zero. This is usable for channel- and cohort-level
   revenue planning; it is **not** usable for per-user pricing.
@@ -208,9 +243,10 @@ one that doesn't.
 ## Layout
 
 ```
-src/synth.py        synthetic data + walk-forward splits
+src/synth.py        synthetic data + walk-forward splits with label embargo
 src/leakage.py      label leakage demonstration
 src/two_stage.py    two-stage model, isotonic calibration, metrics
 src/experiments.py  SRM, power, CUPED, sequential testing
 run_all.py          reproduces every table above
+tests/test_core.py  12 invariant tests
 ```
